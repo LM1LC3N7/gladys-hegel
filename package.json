@@ -1,6 +1,6 @@
 {
   "name": "gladys-hegel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for Hegel amplifiers (power, volume capped by an option, mute, input) over their local IP control port. Unofficial, not affiliated with Hegel Music Systems.",
   "type": "module",

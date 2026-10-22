@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-22
+
 ### Added
 
 - Hegel amplifiers with IP control (port 50001 by default), added by IP
@@ -62,4 +64,5 @@ the notes of the version's GitHub Release.
   written; a connection flooded with lines is closed. The tables of `/data`
   have no prototype.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-hegel/commits/main
+[Unreleased]: https://github.com/LM1LC3N7/gladys-hegel/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-hegel/releases/tag/v0.1.1
