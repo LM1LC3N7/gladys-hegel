@@ -1,61 +1,113 @@
-# Demo Devices Template
+# Hegel for Gladys
 
-This is the user documentation of the integration. Gladys re-hosts this file
-and shows a permanent **Documentation** link to it in the Configuration screen
-(in the user's language, with English as the fallback) — it is when
-configuring that the user needs it most. Keep the short onboarding hints in
-the `section` blocks of the manifest `config_schema`; put the long
-step-by-step (screenshots, troubleshooting…) here.
+Control your **Hegel** amplifiers with IP control (H95, H120, H190, H390,
+H590, Röst…) from Gladys, locally, without any cloud: power on, standby,
+volume (capped), mute and input.
+
+> **Important.** This integration has never been tested with a real device:
+> it was written from the `hegel-ip-client` library (the one Home Assistant
+> uses) and tested against a fake amplifier only. Feedback is welcome.
+> Unofficial integration, not affiliated with Hegel Music Systems.
+
+## Installation
+
+1. Connect the amplifier to your network and give it a **fixed IP address** in
+   your router (reserved DHCP lease).
+2. On the amplifier, enable **IP control** (setup menu, depending on the
+   model) so that it also answers in standby and can be woken up.
+3. In Gladys, install the **Hegel** integration, then open its configuration.
+4. Type the IP addresses, separated by commas (for example
+   `192.168.1.60, 192.168.1.61`). The control port is 50001; for another one,
+   add it: `192.168.1.60:5000`.
+5. Choose the **volume cap** (40 by default) and, if you wish, name the
+   inputs.
+6. The amplifiers appear in the **Discovery** tab: create them.
+
+The integration keeps a connection open with each amplifier: what is changed
+on the amplifier or its remote shows in Gladys at once. The states are also
+read again every minute.
 
 ## What you get
 
-Six demo devices show up after installation: a weather station (real data
-from Open-Meteo), a switch, a dimmable light, a smart plug with power
-metering, a motion sensor and a camera.
+| Feature  | Gladys type                | Note                                                  |
+| -------- | -------------------------- | ----------------------------------------------------- |
+| Power    | binary state (read only)   | 1 on, 0 in standby or unreachable                     |
+| Power on | button                     | `-p.1`                                                |
+| Standby  | button                     | `-p.0`                                                |
+| Volume   | music / volume (0 to 100)  | the value of the amplifier display; command capped    |
+| Mute     | button (television / mute) | each press reads the state, then sets the opposite    |
+| Input    | dropdown                   | the inputs named or already seen; the list only grows |
 
-## Configuration
+On purpose, no **switch**: an "everything off" or "everything on" from a voice
+assistant or a scene neither wakes nor cuts your amplifier.
 
-1. Open the **Configuration** tab of the integration.
-2. Set the **latitude** and **longitude** the demo weather station should
-   observe (they default to Paris), and pick your temperature unit.
-   The **refresh interval** sets how often the weather station and the
-   plug's power are read: every 5 minutes by default, every minute at most.
-3. Save: the devices appear in the **Discovery** tab, ready to be added.
+## Volume cap
 
-The **Prefer the local connection** toggle drives the demo plug: it reports
-the channel it actually uses as a badge (local or cloud), with an orange dot
-when it runs degraded (local refused, cloud fallback).
+The volume of a Hegel amplifier goes from 0 to 100, as on its display; Gladys
+shows the same value. A command from Gladys (dashboard, scene, voice
+assistant) above the **cap** sets the cap, never more. The cap is read just
+before sending: a new value saved applies at once.
 
-## Actions
+The volume set on the amplifier itself (knob, remote) is not changed by the
+integration, except in the two cases where Gladys would make it heard:
 
-- **Test the weather provider** — performs a live request to Open-Meteo and
-  shows the current temperature and humidity under the button.
-- **Identify a device** — pick one of your devices in the list and it will
-  signal itself (the demo light "blinks" in the logs).
+- **Unmute**: if the volume of the amplifier is above the cap, it is first
+  brought back to the cap, then the mute is removed. If the volume cannot be
+  read, nothing is sent; if the amplifier does not confirm the lowering, the
+  mute is kept.
+- **Power on**: after the wake-up, the volume is read again and brought back
+  to the cap when above it (start-up volume of the amplifier), until the
+  amplifier confirms a volume at or under the cap. If the amplifier is slow to
+  wake up, the integration checks a few more times for about 15 seconds, and
+  lowers a volume reported above the cap during that time.
 
-## Scenes
+A command succeeds only when the amplifier answers the value asked.
 
-The integration adds its own cards to the scene editor (Gladys 5.1 or
-later), under the **Integrations** category:
+## Inputs
 
-- **Motion detected** (trigger) — starts the scene when a demo motion sensor
-  sees something move. Optionally pick the sensor and what moved (person,
-  animal); left empty, any detection matches. The following actions can
-  read what moved with `{{triggerEvent.data.target}}`.
-- **Identify a device** (action) — makes the chosen device signal itself.
-  It returns whether the device could signal itself, so the following
-  actions can depend on it.
+The protocol gives the number of the selected input, not its name. Type the
+names in the configuration, numbered as in the manual of your model, for
+example `1=Balanced, 2=Analog 1, 9=Network`. An input selected on the
+amplifier is added to the list as "Input N".
 
-## Dashboard
+## Commands
 
-Add the **Demo status** widget to a dashboard: it shows the live
-temperature of the weather station and the power of the office plug, the
-connection the plug currently uses (orange when degraded) and the observed
-location. Its **Identify the light** button makes the demo light signal
-itself.
+Every command is answered within 4 seconds (Gladys waits 5 seconds). A command
+that left for the amplifier without confirmation (no answer, or an error line
+`-e.N` from the amplifier) is reported "sent, without confirmation"; the line
+the amplifier writes next shows what it did. A command that could not leave is
+reported "nothing sent". **Standby** goes before every command waiting,
+cancels a Power on still waiting, and leaves as soon as the connection is open,
+even before the states are first read.
 
-## Troubleshooting
+## Reconnection
 
-The integration logs everything it does: check the integration logs from the
-Gladys UI (or `docker logs` on the host) with `LOG_LEVEL=debug` for the full
-detail.
+An amplifier that does not answer (off, IP control disabled, unplugged) shows
+its power at 0 and is named in the integration status. The integration
+reconnects after 10 s, then at intervals doubled after each failure, up to 5
+minutes. Two reads in a row without an answer close the connection, then the
+same spaced reconnection applies. The time of the last attempt is kept in
+`/data`: after a restart of the integration, an amplifier is not asked again
+less than a minute after that attempt.
+
+## Configuration button
+
+- **Check the amplifiers**: the connection, power, volume, mute and input of
+  each amplifier, as known (no extra request to the amplifier), and the cap in
+  force.
+
+## Data and privacy
+
+The integration asks for no account and no password: Hegel IP control has
+none. It keeps in `/data/hegel.json` the list of known amplifiers (address,
+inputs) and the time of the last connection attempt. Nothing leaves your local
+network.
+
+## Known limits
+
+- The identity of an amplifier is its address: the protocol gives neither a
+  serial number nor a model. Keep a fixed IP address.
+- A Hegel amplifier may accept only one IP control client at a time: close
+  the other tools connecting to it.
+- No volume steps (`-v.u` / `-v.d`), no display brightness nor standby delay.
+- Never tested with a real device: the real answers may differ.

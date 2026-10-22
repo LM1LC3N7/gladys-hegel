@@ -1,67 +1,117 @@
-# Template de démonstration
+# Hegel pour Gladys
 
-Ceci est la documentation utilisateur de l'intégration. Gladys ré-héberge ce
-fichier et affiche un lien **Documentation** permanent vers lui dans l'écran
-de configuration (dans la langue de l'utilisateur, avec l'anglais en repli) —
-c'est au moment de configurer que l'utilisateur en a le plus besoin. Gardez
-les courtes indications d'accueil dans les blocs `section` du `config_schema`
-du manifest ; mettez ici le pas-à-pas détaillé (captures d'écran, dépannage…).
+Pilotez depuis Gladys vos amplis **Hegel** dotés du contrôle IP (H95, H120,
+H190, H390, H590, Röst…), en local, sans aucun cloud : allumage, veille,
+volume (plafonné), sourdine et entrée.
+
+> **Important.** Cette intégration n'a jamais été testée avec un vrai
+> appareil : elle a été écrite à partir de la bibliothèque `hegel-ip-client`
+> (celle qu'utilise Home Assistant) et testée avec un faux ampli seulement.
+> Vos retours sont les bienvenus. Intégration non officielle, sans lien avec
+> Hegel Music Systems.
+
+## Installation
+
+1. Branchez l'ampli sur votre réseau et donnez-lui une **adresse IP fixe**
+   dans votre box (bail DHCP réservé).
+2. Sur l'ampli, activez le **contrôle IP** (menu de configuration, selon le
+   modèle) pour qu'il réponde aussi en veille et puisse être réveillé.
+3. Dans Gladys, installez l'intégration **Hegel**, puis ouvrez sa
+   configuration.
+4. Saisissez les adresses IP, séparées par des virgules (par exemple
+   `192.168.1.60, 192.168.1.61`). Le port de contrôle est le 50001 ; pour un
+   autre, ajoutez-le : `192.168.1.60:5000`.
+5. Choisissez le **plafond de volume** (40 par défaut) et, si vous le
+   souhaitez, nommez les entrées.
+6. Les amplis apparaissent dans l'onglet **Découverte** : créez-les.
+
+L'intégration garde une connexion ouverte avec chaque ampli : ce qui est
+changé sur l'ampli ou sa télécommande s'affiche aussitôt dans Gladys. Les états
+sont aussi relus chaque minute.
 
 ## Ce que vous obtenez
 
-Six appareils de démonstration apparaissent après l'installation : une
-station météo (vraies données Open-Meteo), un interrupteur, une lampe
-variable, une prise connectée avec mesure de puissance, un détecteur de
-mouvement et une caméra.
+| Fonction | Type Gladys                    | Remarque                                                        |
+| -------- | ------------------------------ | --------------------------------------------------------------- |
+| Marche   | état binaire (lecture seule)   | 1 allumé, 0 en veille ou injoignable                            |
+| Allumer  | bouton                         | `-p.1`                                                          |
+| Veille   | bouton                         | `-p.0`                                                          |
+| Volume   | musique / volume (0 à 100)     | la valeur de l'écran de l'ampli ; commande plafonnée            |
+| Sourdine | bouton (télévision / sourdine) | chaque appui lit l'état, puis règle l'inverse                   |
+| Entrée   | liste déroulante               | les entrées nommées ou déjà vues ; la liste ne fait que grandir |
 
-## Configuration
+Volontairement, aucun **interrupteur** : un « éteins tout » ou « allume tout »
+d'un assistant vocal ou d'une scène ne réveille ni ne coupe votre ampli.
 
-1. Ouvrez l'onglet **Configuration** de l'intégration.
-2. Renseignez la **latitude** et la **longitude** que la station météo de
-   démonstration doit observer (Paris par défaut), et choisissez votre unité
-   de température. L'**intervalle de rafraîchissement** règle la fréquence
-   de lecture de la station météo et de la puissance de la prise : toutes
-   les 5 minutes par défaut, toutes les minutes au plus.
-3. Enregistrez : les appareils apparaissent dans l'onglet **Découverte**,
-   prêts à être ajoutés.
+## Plafond de volume
 
-Le réglage **Préférer la connexion locale** pilote la prise de
-démonstration : elle affiche en badge le canal réellement utilisé (local ou
-cloud), avec un point orange quand elle fonctionne en mode dégradé (local
-refusé, bascule cloud).
+Le volume d'un ampli Hegel va de 0 à 100, comme sur son écran ; Gladys affiche
+la même valeur. Une commande de Gladys (tableau de bord, scène, assistant
+vocal) au-dessus du **plafond** règle le plafond, jamais plus. Le plafond est
+relu juste avant l'envoi : une nouvelle valeur enregistrée s'applique aussitôt.
 
-## Actions
+Le volume réglé sur l'ampli lui-même (bouton, télécommande) n'est pas modifié
+par l'intégration, sauf dans les deux cas où Gladys le rendrait audible :
 
-- **Tester le fournisseur météo** — effectue une requête en direct vers
-  Open-Meteo et affiche la température et l'humidité actuelles sous le
-  bouton.
-- **Identifier un appareil** — choisissez un de vos appareils dans la liste
-  et il se signale (la lampe de démonstration « clignote » dans les logs).
+- **Retrait de la sourdine** : si le volume de l'ampli dépasse le plafond, il
+  est d'abord ramené au plafond, puis la sourdine est retirée. Si le volume ne
+  peut pas être lu, rien n'est envoyé ; si l'ampli ne confirme pas la baisse,
+  la sourdine est gardée.
+- **Allumage** : après le réveil, le volume est relu et ramené au plafond s'il
+  le dépasse (volume de démarrage de l'ampli), jusqu'à ce que l'ampli confirme
+  un volume au plafond ou en dessous. Si l'ampli est lent à se réveiller,
+  l'intégration vérifie encore quelques fois pendant environ 15 secondes, et
+  baisse un volume signalé au-dessus du plafond pendant ce temps.
 
-## Scènes
+Une commande n'est réussie que si l'ampli répond la valeur demandée.
 
-L'intégration ajoute ses propres cartes à l'éditeur de scènes (Gladys 5.1
-ou plus récent), dans la catégorie **Intégrations** :
+## Entrées
 
-- **Mouvement détecté** (déclencheur) — lance la scène quand un détecteur
-  de démonstration voit bouger quelque chose. Choisissez éventuellement le
-  détecteur et ce qui a bougé (personne, animal) ; laissés vides, toute
-  détection correspond. Les actions suivantes peuvent lire ce qui a bougé
-  avec `{{triggerEvent.data.target}}`.
-- **Identifier un appareil** (action) — fait se signaler l'appareil choisi.
-  Elle indique si l'appareil a pu se signaler, pour que les actions
-  suivantes puissent en dépendre.
+Le protocole donne le numéro de l'entrée choisie, pas son nom. Saisissez les
+noms dans la configuration, numérotés comme dans le manuel de votre modèle,
+par exemple `1=Symétrique, 2=Analogique 1, 9=Réseau`. Une entrée choisie sur
+l'ampli est ajoutée à la liste sous la forme « Input N ».
 
-## Tableau de bord
+## Commandes
 
-Ajoutez le widget **État de la démo** à un tableau de bord : il affiche en
-direct la température de la station météo et la puissance de la prise du
-bureau, la connexion utilisée par la prise (en orange si dégradée) et la
-position observée. Son bouton **Identifier la lampe** fait se signaler la
-lampe de démonstration.
+Chaque commande reçoit une réponse en moins de 4 secondes (Gladys attend 5
+secondes). Une commande partie vers l'ampli sans confirmation (pas de réponse,
+ou une ligne d'erreur `-e.N` de l'ampli) est signalée « envoyée, sans
+confirmation » ; la ligne écrite ensuite par l'ampli montre ce qu'il a fait.
+Une commande qui n'a pas pu partir est signalée « rien n'a été envoyé ». La
+**veille** passe avant toutes les commandes en attente, annule un allumage
+encore en attente, et part dès que la connexion est ouverte, même avant la
+première lecture des états.
 
-## Dépannage
+## Reconnexion
 
-L'intégration journalise tout ce qu'elle fait : consultez les logs de
-l'intégration depuis l'interface Gladys (ou `docker logs` sur l'hôte) avec
-`LOG_LEVEL=debug` pour le détail complet.
+Un ampli qui ne répond pas (éteint, contrôle IP désactivé, débranché) affiche
+sa marche à 0 et est nommé dans le statut de l'intégration. L'intégration se
+reconnecte après 10 s, puis à intervalles doublés après chaque échec, jusqu'à
+5 minutes. Deux relectures de suite sans réponse ferment la connexion, puis la
+même reconnexion espacée s'applique. L'heure de la dernière tentative est
+gardée dans `/data` : après un redémarrage de l'intégration, un ampli n'est
+pas redemandé moins d'une minute après cette tentative.
+
+## Bouton de configuration
+
+- **Vérifier les amplis** : la connexion, la marche, le volume, la sourdine et
+  l'entrée de chaque ampli, tels que connus (aucune requête de plus vers
+  l'ampli), et le plafond en vigueur.
+
+## Données et vie privée
+
+L'intégration ne demande ni compte ni mot de passe : le contrôle IP Hegel n'en
+a pas. Elle garde dans `/data/hegel.json` la liste des amplis connus (adresse,
+entrées) et l'heure de la dernière tentative de connexion. Rien ne sort de
+votre réseau local.
+
+## Limites connues
+
+- L'identité d'un ampli est son adresse : le protocole ne donne ni numéro de
+  série ni modèle. Gardez une adresse IP fixe.
+- Un ampli Hegel n'accepte peut-être qu'un client de contrôle IP à la fois :
+  fermez les autres outils qui s'y connectent.
+- Pas de réglage du volume par pas (`-v.u` / `-v.d`), ni de la luminosité ou
+  du délai de mise en veille.
+- Jamais testé avec un vrai appareil : les vraies réponses peuvent différer.
