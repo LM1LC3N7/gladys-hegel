@@ -425,6 +425,32 @@ test('review 2, A5: a late configuration read never overwrites a newer save', as
   assert.equal(ctx.app.config.maxVolume, 20);
 });
 
+test('review 3, A7: a reconnection overtaken by a save still republishes the status and states', async (t) => {
+  const ctx = await setup(t);
+  await sleep(100);
+  const original = ctx.gladys.getConfig.bind(ctx.gladys);
+  ctx.gladys.getConfig = async () => {
+    await sleep(200);
+    return { ...ctx.base, max_volume: 60 };
+  };
+  const statuses = ctx.gladys.fake.connectionStatuses.length;
+  let forgets = 0;
+  const forget = ctx.gladys.forgetPublishedStates.bind(ctx.gladys);
+  ctx.gladys.forgetPublishedStates = (...args) => {
+    forgets += 1;
+    return forget(...args);
+  };
+  const reconnect = ctx.app.connected();
+  await sleep(50);
+  await ctx.gladys.fake.configUpdated({ ...ctx.base, max_volume: 20 });
+  await reconnect;
+  ctx.gladys.getConfig = original;
+  assert.equal(forgets, 1);
+  assert.ok(ctx.gladys.fake.connectionStatuses.length > statuses, 'status republished');
+  // The newest configuration is kept (A5).
+  assert.equal(ctx.app.config.maxVolume, 20);
+});
+
 // --- M8: details ---------------------------------------------------------------------------
 
 test('M8: the pending limit never refuses a Standby; a read answered by an error says so', async (t) => {

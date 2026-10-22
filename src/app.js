@@ -119,6 +119,8 @@ export class HegelApp {
     const current = () => epoch === this.epoch && this.started;
     this.timers.clearTimeout(this.configRetryTimer);
     this.configRetryTimer = undefined;
+    /** The last configuration given (raw), for a reconnection overtaken by a save. */
+    this.raw = raw;
     this.config = normalizeConfig(raw);
     this.started = true;
     this.timers.clearInterval(this.tickTimer);
@@ -174,6 +176,7 @@ export class HegelApp {
       config = await this.gladys.getConfig();
     } catch (err) {
       if (epoch !== this.epoch) {
+        await this.restartConnected();
         return;
       }
       const delay = Math.min(
@@ -191,10 +194,24 @@ export class HegelApp {
     }
     if (epoch !== this.epoch) {
       // A configuration saved while this read was in flight is newer: the
-      // late answer never overwrites it.
+      // late answer never overwrites it, but the reconnection still happened.
+      await this.restartConnected();
       return;
     }
     await this.start(config, { connected: true });
+  }
+
+  /**
+   * A reconnection to Gladys overtaken by a newer start (a configuration
+   * saved meanwhile): started again with that newest configuration, as a
+   * reconnection (status and published states forgotten, then republished).
+   * Nothing when the app was stopped.
+   */
+  async restartConnected() {
+    if (!this.started) {
+      return;
+    }
+    await this.start(this.raw, { connected: true });
   }
 
   async step(name, task) {
