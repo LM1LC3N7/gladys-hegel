@@ -408,6 +408,23 @@ test('M7: getConfig failing on connection is tried again, spaced out', async (t)
   assert.equal(calls, 3);
 });
 
+test('review 2, A5: a late configuration read never overwrites a newer save', async (t) => {
+  const ctx = await setup(t, { config: { max_volume: 60 } });
+  const stale = { ...ctx.base, max_volume: 60 };
+  const original = ctx.gladys.getConfig.bind(ctx.gladys);
+  ctx.gladys.getConfig = async () => {
+    await sleep(200);
+    return stale;
+  };
+  const reconnect = ctx.app.connected();
+  await sleep(50);
+  await ctx.gladys.fake.configUpdated({ ...ctx.base, max_volume: 20 });
+  assert.equal(ctx.app.config.maxVolume, 20);
+  await reconnect;
+  ctx.gladys.getConfig = original;
+  assert.equal(ctx.app.config.maxVolume, 20);
+});
+
 // --- M8: details ---------------------------------------------------------------------------
 
 test('M8: the pending limit never refuses a Standby; a read answered by an error says so', async (t) => {

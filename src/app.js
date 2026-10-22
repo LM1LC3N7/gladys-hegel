@@ -189,6 +189,11 @@ export class HegelApp {
       }, delay);
       return;
     }
+    if (epoch !== this.epoch) {
+      // A configuration saved while this read was in flight is newer: the
+      // late answer never overwrites it.
+      return;
+    }
     await this.start(config, { connected: true });
   }
 
