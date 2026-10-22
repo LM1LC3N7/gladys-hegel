@@ -62,7 +62,8 @@ export class HegelLink {
     logger,
     timings = TIMINGS,
     timers = globalThis,
-    now = Date.now,
+    // Monotonic: deadlines and backoff never move with the wall clock.
+    now = () => performance.now(),
     connect = createConnection,
   }) {
     this.host = address.host;
@@ -109,15 +110,15 @@ export class HegelLink {
   }
 
   /**
-   * Starts the link. `notBefore` (from the last attempt saved in /data) keeps
-   * a restarted container from asking sooner; a retry asked meanwhile waits
-   * for it too.
+   * Starts the link. `wait` (from the last attempt saved in /data, computed
+   * by the app on the wall clock) keeps a restarted container from asking
+   * sooner; a retry asked meanwhile waits for it too. Everything else here
+   * runs on `now`, a monotonic clock.
    */
-  start({ notBefore = -Infinity } = {}) {
+  start({ wait = 0 } = {}) {
     this.stopped = false;
-    const wait = notBefore - this.now();
     if (wait > 0) {
-      this.lastAttempt = notBefore - this.timings.reconnectBase;
+      this.lastAttempt = this.now() + wait - this.timings.reconnectBase;
       this.schedule(wait);
     } else {
       this.connect();
@@ -388,7 +389,7 @@ export class HegelLink {
    * One exchange: writes `-<key>.<value>` (`?` for a query) and resolves with
    * the value of the first line of the same key (for a command, the first one
    * carrying the value asked). `timeoutMs` counts from now, the wait for the
-   * turn included. `shouldSend` is asked again right before the write: false
+   * turn included. `shouldSend` is asked again right before the write: not true
    * drops the exchange (CANCELLED, nothing sent). `onSent` is called right
    * before the bytes leave.
    * Before that, every failure is "nothing sent" (UNREACHABLE, BUDGET);
@@ -400,7 +401,8 @@ export class HegelLink {
         new DeviceError(ERROR_KINDS.UNREACHABLE, 'Not connected: nothing sent'),
       );
     }
-    if (this.queue.length >= LIMITS.pending) {
+    // A priority exchange (Standby) is never refused by the limit.
+    if (!priority && this.queue.length >= LIMITS.pending) {
       return Promise.reject(
         new DeviceError(ERROR_KINDS.BUDGET, 'Too many commands waiting: nothing sent'),
       );
@@ -452,8 +454,16 @@ export class HegelLink {
         item.reject(new DeviceError(ERROR_KINDS.UNREACHABLE, 'Not connected: nothing sent'));
         continue;
       }
-      if (item.shouldSend && !item.shouldSend()) {
-        item.reject(new DeviceError(ERROR_KINDS.CANCELLED, 'Cancelled by Standby, nothing sent'));
+      // Asked right before the bytes leave: true sends; a string (the reason)
+      // or false drops the exchange, nothing sent.
+      const verdict = item.shouldSend ? item.shouldSend() : true;
+      if (verdict !== true) {
+        item.reject(
+          new DeviceError(
+            ERROR_KINDS.CANCELLED,
+            typeof verdict === 'string' ? verdict : 'Cancelled by Standby, nothing sent',
+          ),
+        );
         continue;
       }
       const entry = {

@@ -18,6 +18,8 @@ export async function startFakeHegel(options = {}) {
     unanswered: new Set(options.unanswered ?? []),
     /** Letters whose command is answered by an error line. */
     errors: new Set(options.errors ?? []),
+    /** Letters whose query is answered by an error line. */
+    queryErrors: new Set(options.queryErrors ?? []),
     /** letter -> ms before the answer. */
     delays: { ...options.delays },
     silent: Boolean(options.silent),
@@ -74,6 +76,10 @@ export async function startFakeHegel(options = {}) {
       return;
     }
     if (options.quietWhenOff && state.p === '0' && letter !== 'p') {
+      return;
+    }
+    if (value === '?' && fake.queryErrors.has(letter)) {
+      reply(socket, letter, '-e.1');
       return;
     }
     if (value !== '?') {

@@ -50,7 +50,7 @@ async function waitFor(predicate, what, timeout = 3_000) {
 
 const settle = (ms = 40) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function setup(t, { deviceOptions, config, devices, store, timings = {} } = {}) {
+async function setup(t, { deviceOptions, config, devices, store, timings = {}, now } = {}) {
   const fake = await startFakeHegel(deviceOptions);
   t.after(() => fake.close());
   const gladys = createFakeGladys({
@@ -72,6 +72,7 @@ async function setup(t, { deviceOptions, config, devices, store, timings = {} } 
     store: memory,
     timers,
     timings: { ...FAST, ...timings },
+    ...(now ? { now } : {}),
   });
   registerHandlers(gladys, app, logger);
   t.after(() => app.stop());

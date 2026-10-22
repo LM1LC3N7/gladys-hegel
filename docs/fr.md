@@ -48,7 +48,8 @@ d'un assistant vocal ou d'une scène ne réveille ni ne coupe votre ampli.
 Le volume d'un ampli Hegel va de 0 à 100, comme sur son écran ; Gladys affiche
 la même valeur. Une commande de Gladys (tableau de bord, scène, assistant
 vocal) au-dessus du **plafond** règle le plafond, jamais plus. Le plafond est
-relu juste avant l'envoi : une nouvelle valeur enregistrée s'applique aussitôt.
+relu juste avant que la ligne parte vers l'ampli : si un plafond plus bas a été
+enregistré entre-temps, la commande est refusée et rien n'est envoyé.
 
 Le volume réglé sur l'ampli lui-même (bouton, télécommande) n'est pas modifié
 par l'intégration, sauf dans les deux cas où Gladys le rendrait audible :
@@ -56,12 +57,19 @@ par l'intégration, sauf dans les deux cas où Gladys le rendrait audible :
 - **Retrait de la sourdine** : si le volume de l'ampli dépasse le plafond, il
   est d'abord ramené au plafond, puis la sourdine est retirée. Si le volume ne
   peut pas être lu, rien n'est envoyé ; si l'ampli ne confirme pas la baisse,
-  la sourdine est gardée.
-- **Allumage** : après le réveil, le volume est relu et ramené au plafond s'il
-  le dépasse (volume de démarrage de l'ampli), jusqu'à ce que l'ampli confirme
-  un volume au plafond ou en dessous. Si l'ampli est lent à se réveiller,
-  l'intégration vérifie encore quelques fois pendant environ 15 secondes, et
-  baisse un volume signalé au-dessus du plafond pendant ce temps.
+  ou si le volume repasse au-dessus du plafond juste avant l'envoi, la
+  sourdine est gardée.
+- **Allumage** : dès que la commande d'allumage est partie vers l'ampli (même
+  sans réponse, avec une réponse tardive ou une erreur), le volume est relu
+  régulièrement pendant environ 17 secondes et ramené au plafond s'il le
+  dépasse (volume de démarrage de l'ampli), y compris un volume signalé
+  au-dessus du plafond pendant ce temps et une baisse que l'ampli aurait
+  ignorée. Un appui sur Veille n'arrête pas ces vérifications : elles ne font
+  que baisser, et seulement un ampli allumé.
+
+Sourdine : la valeur 0 envoyée par une scène retire la sourdine (plafond
+appliqué d'abord) ; toute autre valeur est un appui, qui inverse l'état lu sur
+l'ampli.
 
 Une commande n'est réussie que si l'ampli répond la valeur demandée.
 
@@ -89,7 +97,9 @@ Un ampli qui ne répond pas (éteint, contrôle IP désactivé, débranché) aff
 sa marche à 0 et est nommé dans le statut de l'intégration. L'intégration se
 reconnecte après 10 s, puis à intervalles doublés après chaque échec, jusqu'à
 5 minutes. Deux relectures de suite sans réponse ferment la connexion, puis la
-même reconnexion espacée s'applique. L'heure de la dernière tentative est
+même reconnexion espacée s'applique. Enregistrer la configuration sans changer
+l'adresse ne raccourcit pas cette attente ; le bouton de recherche de l'onglet
+Découverte relance un essai, au plus tôt 10 s après le précédent. L'heure de la dernière tentative est
 gardée dans `/data` : après un redémarrage de l'intégration, un ampli n'est
 pas redemandé moins d'une minute après cette tentative.
 
@@ -109,7 +119,11 @@ votre réseau local.
 ## Limites connues
 
 - L'identité d'un ampli est son adresse : le protocole ne donne ni numéro de
-  série ni modèle. Gardez une adresse IP fixe.
+  série ni modèle. Gardez une adresse IP fixe : si deux amplis échangent leurs
+  adresses (bail DHCP), l'appareil Gladys de l'un commande et affiche l'autre,
+  sans avertissement, et ses entrées s'ajoutent à la liste du premier. Ne
+  saisissez pas le même ampli deux fois (adresse IP et nom) : vous auriez deux
+  appareils et deux connexions, que l'ampli n'accepte peut-être pas.
 - Un ampli Hegel n'accepte peut-être qu'un client de contrôle IP à la fois :
   fermez les autres outils qui s'y connectent.
 - Pas de réglage du volume par pas (`-v.u` / `-v.d`), ni de la luminosité ou

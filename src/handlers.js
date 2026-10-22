@@ -29,9 +29,10 @@ export function registerHandlers(gladys, app, logger) {
   gladys.onConfigUpdated((config) => app.start(config));
 
   // Connection lifecycle (also after every reconnection to Gladys).
+  // A failed configuration read is tried again, spaced out (app.connected).
   gladys.on('connected', async () => {
     try {
-      await app.start(await gladys.getConfig(), { connected: true });
+      await app.connected();
     } catch (err) {
       logger?.error('Start failed', err);
     }

@@ -37,6 +37,13 @@ export function parseVolumeCommand(value) {
   return Number.isInteger(volume) && volume >= 0 && volume <= 100 ? volume : undefined;
 }
 
+/**
+ * The value of a mute press (as gladys-linn): 0 (number or "0") asks to
+ * unmute; anything else is a press of the push button, which sets the
+ * opposite of the mute read from the amplifier.
+ */
+export const muteIntent = (value) => (value === 0 || value === '0' ? 'unmute' : 'toggle');
+
 const short = (value) => String(value).slice(0, 32);
 
 export class HegelApp {
@@ -45,6 +52,7 @@ export class HegelApp {
     logger = createLogger({ name: 'hegel' }),
     store = new FileStore(),
     now = Date.now,
+    clock = () => performance.now(),
     timers = globalThis,
     timings = TIMINGS,
     connect,
@@ -52,7 +60,10 @@ export class HegelApp {
     this.gladys = gladys;
     this.logger = logger;
     this.store = store;
+    /** Wall clock: only for the attempt times written to /data. */
     this.now = now;
+    /** Monotonic clock: budgets, deadlines, windows (never moved by NTP). */
+    this.clock = clock;
     this.timers = timers;
     this.timings = timings;
     this.connect = connect;
@@ -70,17 +81,26 @@ export class HegelApp {
     this.publishTimers = new Map();
     /** device id -> { timer }: the one wake-up check chain of a device (after Power on) */
     this.wakeChecks = new Map();
-    /** device id -> when the last Standby was asked */
-    this.standbyAt = new Map();
-    /** device id -> until when a volume pushed above the cap is lowered (after Power on) */
+    /** Sequence number of the presses (orders Standby and Power on, whatever the clocks). */
+    this.pressSeq = 0;
+    /** device id -> sequence number of the last Standby asked */
+    this.standbySeq = new Map();
+    /** device id -> until when (clock) a volume pushed above the cap is lowered (after Power on) */
     this.wakeWatch = new Map();
     /** ids of the devices whose volume is being lowered by watchWakeVolume */
     this.lowering = new Set();
     this.generation = 0;
+    /** One per start(): a start overtaken by a newer one stops after its next await. */
+    this.epoch = 0;
     this.tickTimer = undefined;
     this.persistTimer = undefined;
+    this.configRetryTimer = undefined;
     /** The writes to /data, one after the other. */
     this.saving = Promise.resolve();
+    /** The status publications, one after the other (never out of order). */
+    this.statusChain = Promise.resolve();
+    /** Clock times of the states published in the last minute (global budget). */
+    this.stateTimes = [];
     this.lastStatus = undefined;
     this.warned = new Set();
     this.started = false;
@@ -95,6 +115,10 @@ export class HegelApp {
    * "already published" is forgotten, since the core forgot it too.
    */
   async start(raw = {}, { connected = false } = {}) {
+    const epoch = ++this.epoch;
+    const current = () => epoch === this.epoch && this.started;
+    this.timers.clearTimeout(this.configRetryTimer);
+    this.configRetryTimer = undefined;
     this.config = normalizeConfig(raw);
     this.started = true;
     this.timers.clearInterval(this.tickTimer);
@@ -113,14 +137,59 @@ export class HegelApp {
         this.logger.warn('Unreadable /data/hegel.json moved to hegel.json.bad');
       }
     }
-    await this.step('read the Gladys devices', () => this.refreshCreated());
-    // A configuration save asks the silent addresses again (never sooner than
-    // the base interval); a reconnection to Gladys does not: Gladys flapping
-    // must never make the amplifiers asked faster.
-    await this.step('open the links', () => this.syncLinks({ retry: !connected }));
-    await this.step('publish the devices', () => this.publishDevices());
-    await this.step('publish the states', () => this.publishAllStates());
-    await this.step('publish the status', () => this.updateStatus());
+    if (!current()) {
+      return;
+    }
+    await this.step('read the Gladys devices', () => this.refreshCreated(epoch));
+    if (!current()) {
+      return;
+    }
+    // Neither a configuration save (changed or not) nor a reconnection to
+    // Gladys asks a silent address sooner: only a new address gets a link of
+    // its own. The Discovery scan is the one explicit retry.
+    await this.step('open the links', () => this.syncLinks());
+    for (const [name, task] of [
+      ['publish the devices', () => this.publishDevices()],
+      ['publish the states', () => this.publishAllStates()],
+      ['publish the status', () => this.updateStatus()],
+    ]) {
+      if (!current()) {
+        return;
+      }
+      await this.step(name, task);
+    }
+  }
+
+  /**
+   * On every connection to Gladys: the configuration read, then start(). A
+   * failed read is tried again, spaced out (`configRetry`, doubled up to
+   * `configRetryMax`), until it works or another start comes first.
+   */
+  async connected(attempt = 0) {
+    this.timers.clearTimeout(this.configRetryTimer);
+    this.configRetryTimer = undefined;
+    const epoch = this.epoch;
+    let config;
+    try {
+      config = await this.gladys.getConfig();
+    } catch (err) {
+      if (epoch !== this.epoch) {
+        return;
+      }
+      const delay = Math.min(
+        this.timings.configRetryMax,
+        this.timings.configRetry * 2 ** Math.min(attempt, 16),
+      );
+      this.logger.warn(
+        `Could not read the configuration (${err.message}), next try in ${delay / 1000} s`,
+      );
+      this.configRetryTimer = this.timers.setTimeout(() => {
+        this.configRetryTimer = undefined;
+        this.connected(attempt + 1).catch(() => {});
+      }, delay);
+      return;
+    }
+    await this.start(config, { connected: true });
   }
 
   async step(name, task) {
@@ -134,6 +203,9 @@ export class HegelApp {
   stop() {
     this.started = false;
     this.generation += 1;
+    this.epoch += 1;
+    this.timers.clearTimeout(this.configRetryTimer);
+    this.configRetryTimer = undefined;
     this.timers.clearInterval(this.tickTimer);
     this.tickTimer = undefined;
     for (const link of this.links.values()) {
@@ -206,12 +278,18 @@ export class HegelApp {
     await this.saveNow();
   }
 
-  /** The first attempt allowed for an address after a start: a minute after the saved one. */
-  notBefore(address) {
+  /**
+   * How long a new link waits before its first attempt: until a minute after
+   * the attempt saved in /data (wall clock, the only one that survives a
+   * restart; a saved time in the future counts as now).
+   */
+  firstWait(address) {
     const last = this.data?.attempts?.[addressId(address)];
-    return Number.isFinite(last)
-      ? Math.min(last, this.now()) + this.timings.attemptSaveEvery
-      : -Infinity;
+    if (!Number.isFinite(last)) {
+      return 0;
+    }
+    const now = this.now();
+    return Math.max(0, Math.min(last, now) + this.timings.attemptSaveEvery - now);
   }
 
   warnOnce(key, message) {
@@ -368,13 +446,13 @@ export class HegelApp {
         logger: this.logger,
         timings: this.timings,
         timers: this.timers,
-        now: this.now,
+        now: this.clock,
         connect: this.connect,
         beforeAttempt: (source) => this.beforeAttempt(source),
         onEvent: (event, source, extra) => this.linkEvent(event, source, extra),
       });
       this.links.set(key, link);
-      link.start({ notBefore: this.notBefore(address) });
+      link.start({ wait: this.firstWait(address) });
     }
   }
 
@@ -527,12 +605,19 @@ export class HegelApp {
    * round until it works. A created device unknown to /data (file reset) is
    * found again from its external id, which holds its address.
    */
-  async refreshCreated() {
+  async refreshCreated(epoch = this.epoch) {
     let list;
     try {
       list = await this.gladys.getDevices();
+      if (epoch !== this.epoch) {
+        // A newer start reads them itself: this late answer changes nothing.
+        return;
+      }
       this.createdStale = false;
     } catch (err) {
+      if (epoch !== this.epoch) {
+        return;
+      }
       this.createdStale = true;
       if (!Array.isArray(this.gladys.devices)) {
         throw err;
@@ -602,6 +687,22 @@ export class HegelApp {
     if (states.length === 0) {
       return;
     }
+    // The global budget, every publication counted (grouped, immediate, after
+    // a creation or a reconnection): beyond it, the publication is deferred,
+    // never lost (the states are read again when it runs).
+    const now = this.clock();
+    while (this.stateTimes.length > 0 && now - this.stateTimes[0] >= 60_000) {
+      this.stateTimes.shift();
+    }
+    if (this.stateTimes.length + states.length > LIMITS.statesPerMinute) {
+      const wait = Math.max(1, Math.ceil(this.stateTimes[0] + 60_000 - now));
+      this.warnOnce('budget', 'More states than Gladys accepts in a minute: publications deferred');
+      this.schedulePublish(device.id, wait);
+      return;
+    }
+    for (let i = 0; i < states.length; i += 1) {
+      this.stateTimes.push(now);
+    }
     try {
       await this.gladys.publishChangedStates(states);
     } catch (err) {
@@ -639,6 +740,9 @@ export class HegelApp {
       }
       return value;
     }
+    if (key === FEATURES.MUTE) {
+      return muteIntent(value);
+    }
     if (BUTTONS.has(key)) {
       return undefined;
     }
@@ -652,29 +756,30 @@ export class HegelApp {
     }
     const key = featureKey(gladysDevice.external_id, feature?.external_id);
     const checked = this.validate(device, key, value);
-    // The budget runs from the request of Gladys, the wait in the queues included.
-    const started = this.now();
-    let late = false;
-    // Set just before a command line leaves: from then on, it may have
-    // reached the amplifier, whatever happens next.
-    const context = { mayHaveSent: false };
+    // The budget runs from the request of Gladys, the wait in the queues
+    // included, on the monotonic clock.
+    const started = this.clock();
+    // `seq` orders the presses (a Standby wins over every Power on pressed
+    // before it, whatever the clocks); `late` is set at the deadline, and
+    // asked again right before every line of this command leaves;
+    // `mayHaveSent` is set just before a line leaves.
+    const context = { mayHaveSent: false, late: false, seq: ++this.pressSeq };
     let run;
     if (key === FEATURES.STANDBY) {
       // Standby is never stuck behind the other commands: it skips the device
       // queue (and goes first on the connection), and cancels a Power on still
-      // waiting and the volume checks after a wake-up.
-      this.standbyAt.set(device.id, started);
-      this.wakeWatch.delete(device.id);
-      this.cancelWakeCheck(device.id);
+      // waiting. It leaves the volume checks of a wake-up running: they only
+      // lower, and an amplifier busy waking up may ignore the Standby.
+      this.standbySeq.set(device.id, context.seq);
       this.cancelQueued(device.id, FEATURES.POWER_ON, 'Cancelled by Standby, nothing sent');
       run = this.command(device, key, checked, started, context);
     } else {
       run = this.enqueue(
         device.id,
         async () => {
-          if (late || this.remaining(started) < 50) {
+          if (context.late || this.remaining(started) < 50) {
             // Gladys stopped waiting while this command was queued: dropped, never sent late.
-            late = true;
+            context.late = true;
             throw new DeviceError(
               ERROR_KINDS.BUDGET,
               'No time left for this command, nothing sent',
@@ -685,12 +790,12 @@ export class HegelApp {
         { urgent: key === FEATURES.MUTE, key },
       );
     }
-    // Wall-clock deadline (not the injectable timers): the ack Gladys waits for.
+    // Real timer (not the injectable timers): the ack Gladys waits for.
     let timer;
     const deadline = new Promise((resolve, reject) => {
       timer = setTimeout(
         () => {
-          late = true;
+          context.late = true;
           reject(
             context.mayHaveSent
               ? new DeviceError(
@@ -716,21 +821,51 @@ export class HegelApp {
   }
 
   remaining(started) {
-    return this.timings.commandBudget - (this.now() - started);
+    return this.timings.commandBudget - (this.clock() - started);
+  }
+
+  /** The cap, read right before a volume line leaves: true, or why it may not. */
+  capGuard(value) {
+    const cap = this.config.maxVolume;
+    return Number(value) <= cap ? true : `Volume ${value} above the cap (${cap}): nothing sent`;
   }
 
   /**
-   * Writes one command line and waits for its answer. A line that may have
+   * Writes one command line and waits for its answer. Right before the bytes
+   * leave (in the pump of the link, after any wait on the connection), the
+   * deadline of the command, the cap for a volume line and `shouldSend` are
+   * asked again: any "no" drops the line, nothing sent. A line that may have
    * reached the amplifier is never reported as "not sent": "sent, without
    * confirmation" (the line pushed by the amplifier shows what it did).
    */
-  async send(device, link, key, value, started, context, { priority = false, shouldSend } = {}) {
+  async send(
+    device,
+    link,
+    key,
+    value,
+    started,
+    context,
+    { priority = false, shouldSend, onSent } = {},
+  ) {
+    const guard = () => {
+      if (context.late) {
+        return 'No time left for this command, nothing sent';
+      }
+      if (key === KEYS.VOLUME) {
+        const cap = this.capGuard(value);
+        if (cap !== true) {
+          return cap;
+        }
+      }
+      return shouldSend ? shouldSend() : true;
+    };
     try {
       return await link.exchange(key, '=', value, this.remaining(started), {
         priority,
-        shouldSend,
+        shouldSend: guard,
         onSent: () => {
           context.mayHaveSent = true;
+          onSent?.();
         },
       });
     } catch (err) {
@@ -757,7 +892,7 @@ export class HegelApp {
         );
       }
       if (err.kind === ERROR_KINDS.CANCELLED) {
-        throw new DeviceError(err.kind, 'Cancelled by Standby, nothing sent');
+        throw new DeviceError(err.kind, err.message);
       }
       throw err;
     }
@@ -776,9 +911,20 @@ export class HegelApp {
       if (err.kind === ERROR_KINDS.UNREACHABLE) {
         throw new DeviceError(err.kind, `${deviceName(device)} is not connected: nothing sent`);
       }
+      if (err.kind === ERROR_KINDS.ANSWERED_ERROR) {
+        throw new DeviceError(
+          ERROR_KINDS.BUDGET,
+          `${what}: the amplifier answered an error, nothing sent`,
+        );
+      }
       throw new DeviceError(ERROR_KINDS.BUDGET, `${what} not read in time: nothing sent`);
     }
     return link.state;
+  }
+
+  /** Whether the volume checks of a wake-up still run for a device (its window). */
+  watching(id) {
+    return (this.wakeWatch.get(id) ?? -Infinity) >= this.clock();
   }
 
   async command(device, key, value, started, context) {
@@ -806,38 +952,34 @@ export class HegelApp {
     const send = (k, v, options) => this.send(device, link, k, v, started, context, options);
     switch (key) {
       case FEATURES.POWER_ON: {
-        // A new press starts over: the check chain of the previous one stops.
-        this.cancelWakeCheck(device.id);
-        // A Standby asked after this press wins: checked again right before
-        // the line is written (it may wait behind a poll query on the
-        // connection), and before every step after it.
-        const alive = () => (this.standbyAt.get(device.id) ?? -Infinity) < started;
-        await send(KEYS.POWER, '1', { shouldSend: alive });
-        if (!alive()) {
-          return undefined;
-        }
-        // A volume pushed above the cap while the amplifier wakes up is lowered too.
-        this.wakeWatch.set(
-          device.id,
-          this.now() + this.timings.wakeChecks * this.timings.wakeCheckDelay,
-        );
+        // A Standby pressed after this press wins: asked again right before
+        // the line is written (it may wait behind a poll query).
+        const standbyAfter = () => (this.standbySeq.get(device.id) ?? 0) > context.seq;
+        await send(KEYS.POWER, '1', {
+          shouldSend: () => (standbyAfter() ? 'Cancelled by Standby, nothing sent' : true),
+          // As the line leaves (whatever its answer: late, refused, lost), the
+          // wake-up window opens and the checks start over: a press that
+          // never left touches neither the window nor the checks running.
+          onSent: () => {
+            this.wakeWatch.set(
+              device.id,
+              this.clock() + (this.timings.wakeChecks + 1) * this.timings.wakeCheckDelay,
+            );
+            this.capAfterWake(device, 1);
+          },
+        });
         // An amplifier wakes up at its start-up volume: brought back to the
-        // cap. Within what is left of this command first, then in the
-        // background while it is still waking up. The ack never depends on it.
-        const done = await this.capVolume(
-          device,
-          link,
-          () => Math.min(this.timings.preRead, this.remaining(started) - 100),
-          alive,
+        // cap within what is left of this command first; the checks go on in
+        // the background until the end of the window. The ack never depends
+        // on it.
+        await this.capVolume(device, link, () =>
+          Math.min(this.timings.preRead, this.remaining(started) - 100),
         ).catch(() => false);
-        if (!done && alive()) {
-          this.capAfterWake(device, 1);
-        }
         return undefined;
       }
       case FEATURES.VOLUME: {
-        // The cap is read here, just before the line leaves: a configuration
-        // saved while the command waited in the queue applies.
+        // Capped here, and the cap asked again right before the line leaves
+        // (send): a cap lowered meanwhile drops the line, nothing sent.
         const target = Math.min(value, this.config.maxVolume);
         if (target < value) {
           this.logger.info(`${deviceName(device)}: volume ${value} capped to ${target}`);
@@ -846,47 +988,52 @@ export class HegelApp {
         return undefined;
       }
       case FEATURES.MUTE: {
-        // Gladys sends a press, not a target: the mute is read from the
-        // amplifier just before, and the opposite is set explicitly (no toggle).
+        // The mute is read from the amplifier just before. 0 asks to unmute;
+        // any other value is a press: the opposite is set explicitly (no toggle).
         const { mute } = await this.readBefore(device, link, 'Mute state', KEYS.MUTE, started);
         if (typeof mute !== 'boolean') {
           throw new Error(`${deviceName(device)}: mute state unknown, nothing sent`);
         }
-        if (mute) {
-          // Unmuting never makes the amplifier play above the cap: the volume
-          // read again decides, and is lowered first when above it.
-          const { volume } = await this.readBefore(device, link, 'Volume', KEYS.VOLUME, started);
-          if (!Number.isInteger(volume)) {
-            throw new Error(`${deviceName(device)}: volume unknown, nothing sent`);
-          }
-          const cap = this.config.maxVolume;
-          if (volume > cap) {
-            this.logger.info(
-              `${deviceName(device)}: volume ${volume} lowered to ${cap} before unmuting`,
-            );
-            try {
-              await send(KEYS.VOLUME, String(cap));
-            } catch (err) {
-              if (err.sent) {
-                throw new DeviceError(
-                  ERROR_KINDS.TIMEOUT,
-                  `${deviceName(device)}: volume not lowered to the cap (sent, without confirmation), mute kept`,
-                  { sent: true },
-                );
-              }
-              throw err;
-            }
-            // Unmuted only once the amplifier says it is at or under the cap.
-            if (!(link.state.volume <= cap)) {
+        const wanted = value === 'unmute' ? false : !mute;
+        if (wanted === mute) {
+          return undefined;
+        }
+        if (wanted) {
+          await send(KEYS.MUTE, '1');
+          return undefined;
+        }
+        // Unmuting never makes the amplifier play above the cap: the volume
+        // read again decides, and is lowered first when above it.
+        const { volume } = await this.readBefore(device, link, 'Volume', KEYS.VOLUME, started);
+        if (!Number.isInteger(volume)) {
+          throw new Error(`${deviceName(device)}: volume unknown, nothing sent`);
+        }
+        const cap = this.config.maxVolume;
+        if (volume > cap) {
+          this.logger.info(
+            `${deviceName(device)}: volume ${volume} lowered to ${cap} before unmuting`,
+          );
+          try {
+            await send(KEYS.VOLUME, String(cap));
+          } catch (err) {
+            if (err.sent) {
               throw new DeviceError(
                 ERROR_KINDS.TIMEOUT,
-                `${deviceName(device)}: volume not lowered to the cap, mute kept`,
+                `${deviceName(device)}: volume not lowered to the cap (sent, without confirmation), mute kept`,
                 { sent: true },
               );
             }
+            throw err;
           }
         }
-        await send(KEYS.MUTE, mute ? '0' : '1');
+        // The volume known right before -m.0 leaves decides (a knob turned up
+        // while the line waited): above the cap or unknown, the mute is kept.
+        await send(KEYS.MUTE, '0', {
+          shouldSend: () =>
+            Number.isInteger(link.state.volume) && link.state.volume <= this.config.maxVolume
+              ? true
+              : `${deviceName(device)}: volume above the cap, mute kept, nothing sent`,
+        });
         return undefined;
       }
       case FEATURES.INPUT:
@@ -901,7 +1048,8 @@ export class HegelApp {
    * Reads the power and the volume, and lowers the volume to the cap when the
    * amplifier is on and above it. True when settled (lowered, or nothing to
    * lower), false when it cannot tell yet (waking up) or did not confirm the
-   * lowering (the checks go on). `alive` false stops it.
+   * lowering. `alive` false stops it. The cap is asked again right before
+   * the lowering leaves.
    */
   async capVolume(device, link, budget, alive = () => true) {
     if (budget() <= 0 || !link.connected || !alive()) {
@@ -924,19 +1072,21 @@ export class HegelApp {
       return false;
     }
     this.logger.info(`${deviceName(device)}: woke up at volume ${volume}, lowered to ${cap}`);
-    await link.exchange(KEYS.VOLUME, '=', String(cap), budget());
+    await link.exchange(KEYS.VOLUME, '=', String(cap), budget(), {
+      shouldSend: () => this.capGuard(cap),
+    });
     // Settled only on the volume the amplifier gives back, never on the command alone.
     return link.state.volume <= this.config.maxVolume;
   }
 
   /**
    * A volume pushed above the cap while an amplifier wakes up (within the
-   * window of the checks after Power on): lowered through the device queue,
-   * one at a time per device.
+   * window opened by a Power on that left; a Standby does not close it):
+   * lowered through the device queue, one at a time per device. A lowering
+   * not confirmed is tried again by the checks while the window is open.
    */
   watchWakeVolume(device, link) {
-    const until = this.wakeWatch.get(device.id);
-    if (until === undefined || this.now() > until || this.lowering.has(device.id)) {
+    if (!this.watching(device.id) || this.lowering.has(device.id)) {
       return;
     }
     if (link.state.power !== true || !(link.state.volume > this.config.maxVolume)) {
@@ -945,11 +1095,16 @@ export class HegelApp {
     this.lowering.add(device.id);
     this.enqueue(device.id, () => {
       const current = this.connectedLink(device);
-      return current && this.wakeWatch.has(device.id)
+      return current && this.watching(device.id)
         ? this.capVolume(device, current, () => this.timings.preRead)
         : false;
     })
       .catch(() => false)
+      .then((done) => {
+        if (!done && this.watching(device.id) && !this.wakeChecks.has(device.id)) {
+          this.capAfterWake(device, 1);
+        }
+      })
       .finally(() => this.lowering.delete(device.id));
   }
 
@@ -963,12 +1118,15 @@ export class HegelApp {
   }
 
   /**
-   * After a Power on: the cap checked again every `wakeCheckDelay`,
-   * `wakeChecks` times at most, through the device queue. One chain per
-   * device: a new chain (another Power on) replaces the running one; Standby
-   * cancels it.
+   * After a Power on that left: the cap checked every `wakeCheckDelay`,
+   * `wakeChecks` times, through the device queue, until the end of the
+   * window (a volume read under the cap once does not end them: an amplifier
+   * may apply its start-up volume later without pushing it). One chain per
+   * device: a new chain (another Power on that left) replaces the running
+   * one; a Standby does not stop it (the checks only lower, and only an
+   * amplifier on).
    */
-  capAfterWake(device, attempt, chain = { timer: undefined }) {
+  capAfterWake(device, attempt, chain = { timer: undefined }, lastDone = false) {
     if (attempt === 1) {
       this.cancelWakeCheck(device.id);
       this.wakeChecks.set(device.id, chain);
@@ -976,7 +1134,9 @@ export class HegelApp {
     const current = () => this.wakeChecks.get(device.id) === chain;
     if (attempt > this.timings.wakeChecks) {
       this.wakeChecks.delete(device.id);
-      this.logger.info(`${deviceName(device)}: volume not confirmed after waking up`);
+      if (!lastDone) {
+        this.logger.info(`${deviceName(device)}: volume not confirmed after waking up`);
+      }
       return;
     }
     const generation = this.generation;
@@ -987,19 +1147,14 @@ export class HegelApp {
       this.enqueue(device.id, async () => {
         const link = this.connectedLink(device);
         if (!link || !current()) {
-          return !current();
+          return false;
         }
         return this.capVolume(device, link, () => this.timings.preRead, current);
       })
         .catch(() => false)
         .then((done) => {
-          if (!current()) {
-            return;
-          }
-          if (done) {
-            this.wakeChecks.delete(device.id);
-          } else {
-            this.capAfterWake(device, attempt + 1, chain);
+          if (current()) {
+            this.capAfterWake(device, attempt + 1, chain, done);
           }
         });
     }, this.timings.wakeCheckDelay);
@@ -1068,7 +1223,17 @@ export class HegelApp {
       .map(addressKey);
   }
 
-  async updateStatus() {
+  /**
+   * The status, one publication at a time: each one is computed when its
+   * turn comes, so the last one published is always the latest state.
+   */
+  updateStatus() {
+    const run = this.statusChain.then(() => this.publishStatus());
+    this.statusChain = run.catch(() => {});
+    return run;
+  }
+
+  async publishStatus() {
     if (!this.started || !this.data) {
       return;
     }

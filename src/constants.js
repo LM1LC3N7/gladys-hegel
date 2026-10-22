@@ -70,6 +70,9 @@ export const TIMINGS = Object.freeze({
   publishDelay: 1_000,
   /** Writes to /data are grouped. */
   persistDelay: 1_000,
+  /** `getConfig` failed on a connection to Gladys: tried again after this, doubled up to the max. */
+  configRetry: 30_000,
+  configRetryMax: 5 * 60_000,
   /** The background round: status, created devices read again. */
   tick: 30_000,
   /** More lines than this within `floodWindow`: the connection is closed. */
@@ -88,4 +91,6 @@ export const LIMITS = Object.freeze({
   pending: 16,
   /** Length of a name (input label). */
   name: 64,
+  /** States published in any minute, all devices together (Gladys accepts 300). */
+  statesPerMinute: 250,
 });

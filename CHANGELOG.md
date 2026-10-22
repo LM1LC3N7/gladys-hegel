@@ -34,6 +34,26 @@ the notes of the version's GitHub Release.
   doubled up to 5 minutes. A restarted integration never asks an amplifier
   sooner than a minute after the last attempt.
 - "Check the amplifiers" button.
+- A mute value of 0 sent by a scene unmutes (cap applied first); any other
+  value is a press.
+
+### Fixed
+
+- The volume checks after Power on run as soon as the line has left, even
+  when the amplifier answers late, with an error or not at all, and go on for
+  the whole wake-up window: a Standby or a refused second Power on no longer
+  stops them, and a lowering the amplifier ignored is tried again.
+- The cap is checked again right before each volume line leaves: a cap
+  lowered while the line waited drops it, nothing sent; unmuting is refused
+  when the volume went above the cap meanwhile.
+- Deadlines run on a monotonic clock, and a Standby always wins over a Power
+  on pressed before it, whatever the system clock does.
+- Saving an unchanged configuration no longer shortens the wait before the
+  next connection attempt.
+- Every state publication counts in one global budget, under the rate Gladys
+  accepts; statuses are published one at a time, in order.
+- A failed configuration read when connecting to Gladys is tried again,
+  spaced out.
 
 ### Security
 
